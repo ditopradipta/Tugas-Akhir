@@ -326,6 +326,11 @@ class AODV: public Agent {
         void            log_link_broke(Packet *p);
         void            log_link_kept(nsaddr_t dst);
 
+    public:
+        double          iEnergy;
+        double          signal_strength;
+
+
 	/* for passing packets up to agents */
 	PortClassifier *dmux_;
 

@@ -37,6 +37,7 @@ The AODV code developed by the CMU/MONARCH group was optimized and tuned by Sami
 //#include <energy-model.h>
 #include <vector>
 #include <algorithm>
+#include <math.h>
 #include <aodv/mobilenode.h>
 
 #define max(a,b)        ( (a) > (b) ? (a) : (b) )
@@ -48,6 +49,10 @@ The AODV code developed by the CMU/MONARCH group was optimized and tuned by Sami
 #ifdef DEBUG
 static int route_request = 0;
 #endif
+//modifikasi buat pilih RREP
+bool rreq_already_sent = false;
+double energy_select, recv_time, energy_dest, energi_terbesar, last_rreq_on_dest;
+int counts = 0;
 
 
 /*
@@ -152,6 +157,8 @@ AODV::AODV(nsaddr_t id) : Agent(PT_AODV),
 
   logtarget = 0;
   ifqueue = 0;
+  iEnergy = 0;
+  signal_strength = 0;
 }
 
 /*
@@ -671,6 +678,9 @@ struct hdr_ip *ih = HDR_IP(p);
 struct hdr_aodv_request *rq = HDR_AODV_REQUEST(p);
 aodv_rt_entry *rt;
 bool isEligible = true;
+MobileNode *iNode;
+iNode = (MobileNode *) (Node::get_node_by_address(index));
+iEnergy = iNode->energy_model()->energy(); //modif, buat panggil energi
 
   #ifdef DEBUG
     FILE *fp;
@@ -694,7 +704,8 @@ bool isEligible = true;
 	return;
 	}
 
-	if (id_lookup(rq->rq_src, rq->rq_bcast_id)) {
+	//modifikasi buat cari energi rata2 terbesar pd node tujuan
+  if (id_lookup(rq->rq_src, rq->rq_bcast_id) && rq->rq_dst != index) {
 
 	#ifdef DEBUG
 	fprintf(stderr, "%s: discarding request\n", __FUNCTION__);
@@ -715,7 +726,36 @@ bool isEligible = true;
 			// I'm on the list, so I'm eligible for this packet
 			if (rq->rq_eligible_nodes[i] == index) {
 				isEligible = true;
-				break;
+				//break;
+        //modified
+        //modif sinyal
+        signal_strength = p->txinfo_.RxPr;            //RECIEVE SIGNAL
+        double sinyal;
+        if (signal_strength == 0) {
+          sinyal = -200;
+        }
+        else {
+          sinyal = 10*log10(signal_strength) + 30;
+        }
+        if (sinyal >= -75 && sinyal <= -30) {
+          rq->rq_energy_count = rq->rq_energy_count + iEnergy; //buat nambahin energi
+          double energy_avg = rq->rq_energy_count / rq->rq_hop_count;
+          #ifdef DEBUG
+          FILE *fp;
+          fp = fopen("debug.txt", "a");
+          fprintf(fp, "\n fungsi recvrequest: node %d energy: %f, hc: %d, avg energy: %f, sinyal: %f", index, rq->rq_energy_count, rq->rq_hop_count, energy_avg, sinyal);
+          fclose(fp);
+          #endif
+        }
+        else {
+          Packet::free(p); //buat drop paket
+          #ifdef DEBUG
+          FILE *fp;
+          fp = fopen("debug.txt", "a");
+          fprintf(fp, "\n fungsi recvrequest: node %d didrop, sinyal: %f", index, sinyal);
+          fclose(fp);
+          #endif
+        }
 			}
 		}
 	}
@@ -947,28 +987,80 @@ rt = rtable.rt_lookup(rq->rq_dst);
 
 // First check if I am the destination ..
 
+//modifikasi pemilihan RREP
 if(rq->rq_dst == index) {
+  counts++;
+  double mytime;
+  double energy_selected = rq->rq_energy_count / rq->rq_hop_count; //avg energy = jml energi / hop count
+  double diff; //beda waktu antara rreq ke-n dengan rreq ke 1
+  // rreq pertama yg diterima node tujuan
+  if (counts == 1) {
+    last_rreq_on_dest = Scheduler::instance().clock();
+    mytime = Scheduler::instance().clock();
+    energy_select = energy_selected;
+    energi_terbesar = rq->rq_src;
+    diff = mytime - last_rreq_on_dest;
+    seqno = max(seqno, rq->rq_dst_seqno)+1;
+    if (seqno%2) seqno++;
+    sendReply(energi_terbesar, // IP Destination
+    1, // Hop Count
+    index, // Dest IP Address
+    seqno, // Dest Sequence Num
+    MY_ROUTE_TIMEOUT, // Lifetime
+    rq->rq_timestamp); // timestamp*/
+    #ifdef DEBUG
+    FILE *fp2;
+    fp2 = fopen("debug.txt", "a");
+    fprintf(fp2, "destination node menerima RREQ pertama dari node %d, ttl energy: %f avg energy: %f, hop count: %d, last rreq: %f, diff: %f", 
+      rq->rq_src, rq->rq_energy_count, energy_selected, rq->rq_hop_count, last_rreq_on_dest, diff);
+    fclose(fp);
+    #endif
+  }
+  //rreq berikutnya
+  else if (counts != 1) {
+    mytime = Scheduler::instance().clock();
+    double temp = energy_selected;
+    //pemilihan energi, jika energi sekarang lebih besar drpd sebelumnya, update
+    if (temp > energy_select) {
+      energy_select = temp;
+      energi_terbesar = rq->rq_src;
+    }
+    diff = mytime - last_rreq_on_dest;
+    FILE *fp2;
+    fp2 = fopen("debug.txt", "a");
+    fprintf(fp2, "\n destination node menerima RREQ ke-%d dari node %d, ttl energy: %f avg energy: %f, hop count: %d, last rreq: %f, diff: %f, energy select: %f", 
+      counts, rq->rq_src, rq->rq_energy_count, energy_selected, rq->rq_hop_count, last_rreq_on_dest, diff, energy_select);
+    fclose(fp);
+  }
+  //pengiriman route reply, lewat energi yg terbesar
+  if (rreq_already_sent == false && diff >= 0.002) {
+    rreq_already_sent = true;
+    #ifdef DEBUG
+    fprintf(stderr, "%d - %s: destination sending reply\n", index, __FUNCTION__);
+    #endif // DEBUG
 
-#ifdef DEBUG
-fprintf(stderr, "%d - %s: destination sending reply\n", index, __FUNCTION__);
-#endif // DEBUG
+    // Just to be safe, I use the max. Somebody may have
+    // incremented the dst seqno.
+    seqno = max(seqno, rq->rq_dst_seqno)+1;
+    if (seqno%2) seqno++;
 
-// Just to be safe, I use the max. Somebody may have
-// incremented the dst seqno.
-seqno = max(seqno, rq->rq_dst_seqno)+1;
-if (seqno%2) seqno++;
+    sendReply(energi_terbesar, // IP Destination
+    1, // Hop Count
+    index, // Dest IP Address
+    seqno, // Dest Sequence Num
+    MY_ROUTE_TIMEOUT, // Lifetime
+    rq->rq_timestamp); // timestamp
+    #ifdef DEBUG
+      FILE *fp2;
+      fp2 = fopen("debug.txt", "a");
+      fprintf(fp2, "\n mengirim route reply ke node %d, energi: %f", energi_terbesar, energy_select);
+      fclose(fp2);
+    #endif
 
-sendReply(rq->rq_src, // IP Destination
-1, // Hop Count
-
-index, // Dest IP Address
-seqno, // Dest Sequence Num
-MY_ROUTE_TIMEOUT, // Lifetime
-rq->rq_timestamp); // timestamp
-
-delete[] rq->rq_eligible_nodes;
-rq->rq_eligible_nodes = NULL;
-Packet::free(p);
+    delete[] rq->rq_eligible_nodes;
+    rq->rq_eligible_nodes = NULL;
+    Packet::free(p);
+  }
 }
 
 // I am not the destination, but I may have a fresh enough route.
@@ -1272,6 +1364,13 @@ struct hdr_ip *ih = HDR_IP(p);
 struct hdr_aodv_request *rq = HDR_AODV_REQUEST(p);
 aodv_rt_entry *rt = rtable.rt_lookup(dst);
 
+//reset the stats
+last_rreq_on_dest = 0;
+rreq_already_sent = false;
+energy_select = 0;
+counts = 0;
+
+
 /*
 * AODV-PNT re-compute TWR
 */
@@ -1286,6 +1385,7 @@ MobileNode *iNode;
 iNode = (MobileNode *) (Node::get_node_by_address(index));
 double iSpeed = ((MobileNode *) iNode)->speed();
 double now = ((MobileNode *) iNode)->getUpdateTime();
+iEnergy = iNode->energy_model()->energy(); //modif buat manggil energi di node tsb
 
 double iAccel;
 if (now - lastUpdateTime == 0) {
@@ -1538,12 +1638,19 @@ rq->rq_eligible_nodes = eligibleNodes;
  rq->rq_dst = dst;
  rq->rq_dst_seqno = (rt ? rt->rt_seqno : 0);
  rq->rq_src = index;
+ rq->rq_energy_count = iEnergy; // modif buat masukin energy ke paket RREQ
  seqno += 2;
  assert ((seqno%2) == 0);
  rq->rq_src_seqno = seqno;
  rq->rq_timestamp = CURRENT_TIME;
 
  Scheduler::instance().schedule(target_, p, 0.);
+ #ifdef DEBUG
+ FILE *fp;
+ fp = fopen("debug.txt", "a");
+ fprintf(fp, "\n mengirim route request, energi: %f", rq->rq_energy_count);
+ fclose(fp);
+ #endif
 
 }
 

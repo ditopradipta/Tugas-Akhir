@@ -81,8 +81,7 @@ struct hdr_aodv_request {
         u_int32_t       rq_dst_seqno;   // Destination Sequence Number
         nsaddr_t        rq_src;         // Source IP Address
         u_int32_t       rq_src_seqno;   // Source Sequence Number
-        double          rq_energy_count; //buat energi
-
+        double          rq_energy_count; //modif buat itung ttl energi
 	// AODV-PNT addition
 	// array of relay node set
 	nsaddr_t 	*rq_eligible_nodes = NULL;
